@@ -169,19 +169,19 @@ def on_register_host(data):
     token = None
     session_id = f"host_{client_id}"
     
-    # Look for existing disconnected host that can be restored
+    # Look for existing disconnected host that can be restored (no time limit)
     for existing_token, host_info in disconnected_hosts.items():
-        if (time.time() - host_info['disconnect_time']) < 30:  # 30 second grace period
-            # Restore the previous session with same token
-            token = existing_token
-            session_id = host_info['session_id']
+        # Always restore the previous session with same token - no expiry
+        token = existing_token
+        session_id = host_info['session_id']
+        
+        # Restore frame buffer if available
+        if host_info['frame_buffer']:
+            frame_buffers[session_id] = host_info['frame_buffer']
             
-            # Restore frame buffer if available
-            if host_info['frame_buffer']:
-                frame_buffers[session_id] = host_info['frame_buffer']
-                
-            print(f"Host reconnected, restoring token {token}")
-            break
+        disconnect_duration = int(time.time() - host_info['disconnect_time'])
+        print(f"Host reconnected after {disconnect_duration}s, restoring token {token}")
+        break
     
     # If no reconnection, generate new token
     if not token:
@@ -431,7 +431,18 @@ def get_active_tokens():
                 'session_id': session_id,
                 'hostname': session.get('hostname', 'Unknown'),
                 'viewers': len(session.get('viewers', [])),
-                'created_at': session.get('created_at')
+                'created_at': session.get('created_at'),
+                'status': 'active'
+            }
+        elif token in disconnected_hosts:
+            host_info = disconnected_hosts[token]
+            tokens_info[token] = {
+                'session_id': host_info['session_id'],
+                'hostname': host_info['session_data'].get('hostname', 'Unknown'),
+                'viewers': 0,
+                'created_at': host_info['session_data'].get('created_at'),
+                'status': 'disconnected',
+                'disconnect_time': host_info['disconnect_time']
             }
     return jsonify(tokens_info)
 
@@ -487,29 +498,24 @@ def cleanup_stale_connections():
                 if client_id in connection_stats:
                     del connection_stats[client_id]
             
-            # Clean up expired disconnected hosts (after 30 seconds)
-            expired_hosts = []
+            # Clean up very old disconnected hosts (after 24 hours for memory management)
+            very_old_hosts = []
             for token, host_info in disconnected_hosts.items():
-                if current_time - host_info['disconnect_time'] > 30:
-                    expired_hosts.append(token)
+                if current_time - host_info['disconnect_time'] > 86400:  # 24 hours
+                    very_old_hosts.append(token)
             
-            for token in expired_hosts:
-                print(f"Cleaning up expired disconnected host token: {token}")
+            for token in very_old_hosts:
+                disconnect_hours = int((current_time - disconnected_hosts[token]['disconnect_time']) / 3600)
+                print(f"Cleaning up very old disconnected host token: {token} (disconnected {disconnect_hours}h ago)")
                 host_info = disconnected_hosts[token]
                 session_id = host_info['session_id']
                 
-                # Now permanently remove token mappings
+                # Remove from memory after 24 hours
                 if token in token_to_session:
                     del token_to_session[token]
                 if session_id in session_tokens:
                     del session_tokens[session_id]
                     
-                # Notify any remaining viewers that session is permanently closed
-                socketio.emit('host_disconnected', {
-                    'message': 'Host session has expired. Connection closed.',
-                    'token': token
-                }, room=session_id)
-                
                 del disconnected_hosts[token]
             
             # Clean up empty sessions and associated tokens

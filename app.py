@@ -19,7 +19,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'rdp-server-secret-key'
 CORS(app, origins="*")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', 
-                   ping_timeout=5, ping_interval=2, 
+                   ping_timeout=60, ping_interval=25, 
                    compression_threshold=1024, 
                    max_http_buffer_size=16777216)
 
@@ -118,7 +118,7 @@ def on_disconnect():
                     }
                     
                     # Keep token mappings alive for reconnection
-                    print(f"Host {client_id} disconnected, preserving token {token} for 30 seconds")
+                    print(f"Host {client_id} disconnected, preserving token {token} permanently until cleanup")
                     
                     # Notify viewers host is temporarily disconnected
                     socketio.emit('host_temporarily_disconnected', {

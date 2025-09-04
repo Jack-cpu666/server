@@ -1,0 +1,8 @@
+Flask==2.3.3
+Flask-CORS==4.0.0
+Flask-SocketIO==5.3.6
+python-socketio==5.8.0
+eventlet==0.33.3
+gunicorn==21.2.0
+psutil==5.9.6
+numpy==1.24.3

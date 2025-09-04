@@ -29,6 +29,7 @@ frame_buffers = {}
 connection_stats = {}
 token_to_session = {}  # Maps tokens to session IDs
 session_tokens = {}    # Maps session IDs to tokens
+disconnected_hosts = {} # Track disconnected hosts for reconnection grace period
 executor = ThreadPoolExecutor(max_workers=50)
 
 def generate_token():
@@ -103,28 +104,31 @@ def on_disconnect():
     if client_id in connected_clients:
         client_type = connected_clients[client_id].get('type')
         if client_type == 'host':
-            # Clean up host session and token
+            # Handle host disconnection with grace period for reconnection
             for session_id, session in active_sessions.items():
                 if session.get('host_id') == client_id:
-                    # Notify all viewers that host disconnected
-                    socketio.emit('host_disconnected', {
-                        'message': 'Host has disconnected. Session ended.',
-                        'token': session.get('token')
+                    token = session.get('token')
+                    
+                    # Store disconnected host info for reconnection grace period
+                    disconnected_hosts[token] = {
+                        'session_id': session_id,
+                        'session_data': session.copy(),
+                        'disconnect_time': time.time(),
+                        'frame_buffer': frame_buffers.get(session_id)
+                    }
+                    
+                    # Keep token mappings alive for reconnection
+                    print(f"Host {client_id} disconnected, preserving token {token} for 30 seconds")
+                    
+                    # Notify viewers host is temporarily disconnected
+                    socketio.emit('host_temporarily_disconnected', {
+                        'message': 'Host connection lost. Waiting for reconnection...',
+                        'token': token
                     }, room=session_id)
                     
-                    # Clean up token mappings
-                    token = session.get('token')
-                    if token:
-                        if token in token_to_session:
-                            del token_to_session[token]
-                        if session_id in session_tokens:
-                            del session_tokens[session_id]
-                    
-                    # Clean up session buffers
+                    # Clean up active session but preserve token mappings
                     if session_id in frame_buffers:
                         del frame_buffers[session_id]
-                    
-                    # Remove session
                     del active_sessions[session_id]
                     break
         
@@ -161,11 +165,29 @@ def on_register_host(data):
     connected_clients[client_id]['hostname'] = data.get('hostname', 'Unknown')
     connected_clients[client_id]['resolution'] = data.get('resolution', {'width': 1920, 'height': 1080})
     
-    # Generate unique token for this host session
-    token = generate_token()
+    # Check if this is a reconnection of a previously disconnected host
+    token = None
     session_id = f"host_{client_id}"
     
-    # Map token to session
+    # Look for existing disconnected host that can be restored
+    for existing_token, host_info in disconnected_hosts.items():
+        if (time.time() - host_info['disconnect_time']) < 30:  # 30 second grace period
+            # Restore the previous session with same token
+            token = existing_token
+            session_id = host_info['session_id']
+            
+            # Restore frame buffer if available
+            if host_info['frame_buffer']:
+                frame_buffers[session_id] = host_info['frame_buffer']
+                
+            print(f"Host reconnected, restoring token {token}")
+            break
+    
+    # If no reconnection, generate new token
+    if not token:
+        token = generate_token()
+        
+    # Update mappings
     token_to_session[token] = session_id
     session_tokens[session_id] = token
     
@@ -173,12 +195,16 @@ def on_register_host(data):
         'host_id': client_id,
         'viewers': [],
         'created_at': datetime.now().isoformat(),
-        'frame_rate': data.get('frame_rate', 30),
+        'frame_rate': data.get('frame_rate', 15),
         'quality': data.get('quality', 'high'),
         'compression_enabled': True,
         'token': token,
         'hostname': data.get('hostname', 'Unknown')
     }
+    
+    # Remove from disconnected hosts if it was there
+    if token in disconnected_hosts:
+        del disconnected_hosts[token]
     
     frame_buffers[session_id] = {
         'last_frame': None,
@@ -461,6 +487,31 @@ def cleanup_stale_connections():
                 if client_id in connection_stats:
                     del connection_stats[client_id]
             
+            # Clean up expired disconnected hosts (after 30 seconds)
+            expired_hosts = []
+            for token, host_info in disconnected_hosts.items():
+                if current_time - host_info['disconnect_time'] > 30:
+                    expired_hosts.append(token)
+            
+            for token in expired_hosts:
+                print(f"Cleaning up expired disconnected host token: {token}")
+                host_info = disconnected_hosts[token]
+                session_id = host_info['session_id']
+                
+                # Now permanently remove token mappings
+                if token in token_to_session:
+                    del token_to_session[token]
+                if session_id in session_tokens:
+                    del session_tokens[session_id]
+                    
+                # Notify any remaining viewers that session is permanently closed
+                socketio.emit('host_disconnected', {
+                    'message': 'Host session has expired. Connection closed.',
+                    'token': token
+                }, room=session_id)
+                
+                del disconnected_hosts[token]
+            
             # Clean up empty sessions and associated tokens
             empty_sessions = []
             for session_id, session in active_sessions.items():
@@ -470,12 +521,13 @@ def cleanup_stale_connections():
             for session_id in empty_sessions:
                 print(f"Cleaning up empty session: {session_id}")
                 
-                # Clean up token mappings
-                if session_id in session_tokens:
-                    token = session_tokens[session_id]
+                # Only clean up tokens if not in disconnected_hosts (grace period)
+                token = session_tokens.get(session_id)
+                if token and token not in disconnected_hosts:
                     if token in token_to_session:
                         del token_to_session[token]
-                    del session_tokens[session_id]
+                    if session_id in session_tokens:
+                        del session_tokens[session_id]
                 
                 # Clean up session and buffers
                 del active_sessions[session_id]
